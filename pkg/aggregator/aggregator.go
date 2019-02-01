@@ -92,6 +92,10 @@ var (
 	aggregatorServiceCheck            = expvar.Int{}
 	aggregatorEvent                   = expvar.Int{}
 	aggregatorHostnameUpdate          = expvar.Int{}
+
+	// Hold series to be added to aggregated series on each flush
+	recurrentSeries     metrics.Series
+	recurrentSeriesLock sync.Mutex
 )
 
 func init() {
@@ -204,6 +208,13 @@ func deduplicateTags(tags []string) []string {
 	return tags[:idx]
 }
 
+// AddRecurrentSeries adds a serie to the series that are sent at every flush
+func AddRecurrentSeries(newSerie *metrics.Serie) {
+	recurrentSeriesLock.Lock()
+	defer recurrentSeriesLock.Unlock()
+	recurrentSeries = append(recurrentSeries, newSerie)
+}
+
 // IsInputQueueEmpty returns true if every input channel for the aggregator are
 // empty. This is mainly useful for tests and benchmark
 func (agg *BufferedAggregator) IsInputQueueEmpty() bool {
@@ -314,6 +325,27 @@ func (agg *BufferedAggregator) GetSeries() metrics.Series {
 func (agg *BufferedAggregator) flushSeries() {
 	start := time.Now()
 	series := agg.GetSeries()
+
+	recurrentSeriesLock.Lock()
+	// Adding recurrentSeries to the flushed ones
+	for _, extra := range recurrentSeries {
+		if extra.Host == "" {
+			extra.Host = agg.hostname
+		}
+		if extra.SourceTypeName == "" {
+			extra.SourceTypeName = "System"
+		}
+
+		// Updating Ts for every points
+		updatedPoints := []metrics.Point{}
+		for _, point := range extra.Points {
+			point.Ts = float64(start.Unix())
+			updatedPoints = append(updatedPoints, point)
+		}
+		extra.Points = updatedPoints
+		series = append(series, extra)
+	}
+	recurrentSeriesLock.Unlock()
 
 	// Send along a metric that showcases that this Agent is running (internally, in backend,
 	// a `datadog.`-prefixed metric allows identifying this host as an Agent host, used for dogbone icon)
